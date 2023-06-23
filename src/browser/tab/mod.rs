@@ -149,6 +149,7 @@ pub struct Tab {
     transport: Arc<Transport>,
     session_id: SessionId,
     navigating: Arc<AtomicBool>,
+    meaningful_paint_candidate: Arc<AtomicBool>,
     target_info: Arc<Mutex<TargetInfo>>,
     request_interceptor: Arc<Mutex<Arc<RequestIntercept>>>,
     response_handler: Arc<Mutex<HashMap<String, ResponseHandler>>>,
@@ -218,6 +219,7 @@ impl Tab {
             transport,
             session_id,
             navigating: Arc::new(AtomicBool::new(false)),
+            meaningful_paint_candidate: Arc::new(AtomicBool::new(false)),
             target_info: target_info_mutex,
             page_bindings: Arc::new(Mutex::new(HashMap::new())),
             request_interceptor: Arc::new(Mutex::new(Arc::new(
@@ -292,6 +294,7 @@ impl Tab {
             .transport
             .listen_to_target_events(self.session_id.clone());
         let navigating = Arc::clone(&self.navigating);
+        let meaningful_paint_candidate = Arc::clone(&self.meaningful_paint_candidate);
         let interceptor_mutex = Arc::clone(&self.request_interceptor);
         let response_handler_mutex = self.response_handler.clone();
         let loading_failed_handler_mutex = self.loading_failed_handler.clone();
@@ -314,6 +317,9 @@ impl Tab {
                         let event_name = lifecycle_event.params.name.as_ref();
                         trace!("Lifecycle event: {}", event_name);
                         match event_name {
+                            "firstMeaningfulPaintCandidate" => {
+                                navigating.store(true, Ordering::SeqCst);
+                            }
                             "networkAlmostIdle" => {
                                 navigating.store(false, Ordering::SeqCst);
                             }
@@ -505,6 +511,22 @@ impl Tab {
         result
     }
 
+    pub fn wait_for_meaningful_paint_candidate(&self) -> Result<&Self> {
+        let meaningful_paint_candidate = Arc::clone(&self.meaningful_paint_candidate);
+        let timeout = *self.default_timeout.read().unwrap();
+
+        util::Wait::with_timeout(timeout).until(|| {
+            if meaningful_paint_candidate.load(Ordering::SeqCst) {
+                None
+            } else {
+                Some(true)
+            }
+        })?;
+        debug!("A tab rendered a first meaningful paint candidate");
+
+        Ok(self)
+    }
+
     pub fn wait_until_navigated(&self) -> Result<&Self> {
         let navigating = Arc::clone(&self.navigating);
         let timeout = *self.default_timeout.read().unwrap();
@@ -540,6 +562,8 @@ impl Tab {
 
         let navigating = Arc::clone(&self.navigating);
         navigating.store(true, Ordering::SeqCst);
+        let meaningful_paint_candidate = Arc::clone(&self.meaningful_paint_candidate);
+        meaningful_paint_candidate.store(false, Ordering::SeqCst);
 
         info!("Navigating a tab to {}", url);
 
@@ -678,7 +702,7 @@ impl Tab {
     /// assert_eq!(attrs["id"], "foobar");
     /// #
     /// # Ok(())
-    /// # }z
+    /// # }
     /// ```
     pub fn find_element(&self, selector: &str) -> Result<Element<'_>> {
         let root_node_id = self.get_document()?.node_id;
@@ -1153,6 +1177,7 @@ impl Tab {
     /// # fn main() -> Result<()> {
     /// #
     /// use headless_chrome::{protocol::page::ScreenshotFormat, Browser, LaunchOptions};
+    /// use headless_chrome::protocol::cdp::DOM::RGBA;
     /// let browser = Browser::new(LaunchOptions::default_builder().build().unwrap())?;
     /// let tab = browser.new_tab()?;
     /// tab.set_background_color( color: RGBA { r: 255, g: 0, b: 0, a: 1.,})?;
